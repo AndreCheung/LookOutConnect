@@ -1,15 +1,17 @@
 #! /bin/sh
-#Last update 20230908
+#Last update 20230911
 #Develpoer: Andre Cheung, @jiansuo
 #LookOut Connect Bash shell script move PTZ camera, get images and send to LookOut
 
 #function to move camera to preset, get image and post to LookOut
-#first parameter is preset and second parameter is LookOut camera endpoint
+#first parameter is the preset name, 
+#second is wait time (seconds) for the camera to stabilise at the preset,
+#the third parameter is LookOut camera endpoint URL.
 move_get_post ()  {
 	curl -s http://camera.host.name/axis-cgi/com/ptz.cgi?gotoserverpresetname=$1 --anyauth --user username:Password
-	sleep 9
+	sleep $2
 	curl -s --output temp.jpg http://camera.host.name/axis-cgi/jpg/image.cgi?resolution=1920X1080 --anyauth --user username:Password
-	curl $2 -H "content-type: image/jpeg" --data-binary @temp.jpg -s --output result.txt &
+	curl $3 -H "content-type: image/jpeg" --data-binary @temp.jpg -s --output result.txt &
 }
 
 #LookOut camera endpoints
@@ -34,12 +36,12 @@ startsecond=$(date +%s)
 while [ $x -lt $cycle ]
 do
 
-move_get_post preset1 LookOut1
-move_get_post preset2 LookOut2
-move_get_post preset3 LookOut3
-move_get_post preset4 LookOut4
-move_get_post preset5 LookOut5
-move_get_post preset6 LookOut6
+move_get_post preset1 time1 LookOut1
+move_get_post preset2 time2 LookOut2
+move_get_post preset3 time3 LookOut3
+move_get_post preset4 time4 LookOut4
+move_get_post preset5 time5 LookOut5
+move_get_post preset6 time6 LookOut6
 
 image=$(($image+6))
 x=$(($x+1))
