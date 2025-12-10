@@ -18,7 +18,7 @@ SOURCE_PATH = "/path/to/your/image/directory"
 SOURCE_PATH = os.path.abspath(SOURCE_PATH)
 
 # 2. API Endpoint URL (Upload Target)
-UPLOAD_URL = "https://lax.pop.roboticscats.com/api/detects?apiKey=316f285f2e909ce1b3625bfb755286f5"
+UPLOAD_URL = "/URL/to/your/lookout/camera/endpoint"
 
 # 3. Image Processing Parameters
 TARGET_RESOLUTION = (1920, 1080)
