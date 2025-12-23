@@ -1,211 +1,167 @@
 #!/usr/bin/python3
 
-import os
-import sys
-import glob
-from datetime import datetime, timedelta
+import os, sys, json, shutil, pathlib, argparse, random, requests, time, signal, fcntl
+from datetime import datetime
 from PIL import Image
-import requests
+from dotenv import load_dotenv
 
-# --- Global Definitions ---
-# Get the absolute path of the directory where this script resides
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv()
 
-# --- Configuration ---
-# 1. Source Path: **UPDATE THIS VARIABLE** to the ABSOLUTE path containing your images.
-SOURCE_PATH = "/path/to/your/image/directory" 
-# Ensure the source path is absolute
-SOURCE_PATH = os.path.abspath(SOURCE_PATH)
+# --- CONFIGURATION ---
+CAM_IP = os.getenv("CAMERA_IP", "192.168.20.25")
+CAM_USER = os.getenv("CAMERA_USER", "admin")
+CAM_PASS = os.getenv("CAMERA_PASS")
+API_KEY = os.getenv("LOOKOUT_API_KEY")
+UPLOAD_URL = f"https://lax.pop.roboticscats.com/api/detects?apiKey={API_KEY}"
+SOURCE_PATH = pathlib.Path(os.getenv("SOURCE_PATH", "/home/user/ftp/files/camera2"))
+FTP_ARCHIVE_DIR = pathlib.Path(os.getenv("FTP_ARCHIVE_DIR", "/home/user/ftp/files/camera2"))
+BASE_DIR = pathlib.Path(__file__).parent.resolve()
 
-# 2. API Endpoint URL (Upload Target)
-UPLOAD_URL = "/URL/to/your/lookout/camera/endpoint"
+LOG_FILE = FTP_ARCHIVE_DIR / "detectionResults.txt"
+STATE_FILE = BASE_DIR / "last_processed.ptr"
+TARGET_RES = (1920, 1080)
 
-# 3. Image Processing Parameters
-TARGET_RESOLUTION = (1920, 1080)
-CONTENT_TYPE = "image/jpeg"
-TIME_THRESHOLD_MINUTES = 5
+# --- TOOLS ---
+def get_timestamp():
+    """Generates a formatted string for logging and naming."""
+    return datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
 
-def find_newest_image(source_dir):
-    """Finds the ABSOLUTE path to the newest JPG/JPEG file in the source directory."""
-    
-    search_pattern = os.path.join(source_dir, "*.[jJ][pP][gG]*")
-    list_of_files = glob.glob(search_pattern)
-    
-    if not list_of_files:
-        return None
-    
-    # Sort files by modification time (mtime) in descending order
-    # The max() function returns the absolute path
-    latest_file = max(list_of_files, key=os.path.getmtime)
-    
-    return latest_file
+def get_human_readable_size(size):
+    """Convert file size into human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if abs(size) < 1024.0: return f"{size:3.1f}{unit}"
+        size /= 1024.0
+    return f"{size:.1f}TB"
 
-def check_timestamp(file_path, threshold_minutes):
-    """Checks if the file was modified within the threshold time."""
-    
-    file_mtime_epoch = os.path.getmtime(file_path)
-    file_mtime = datetime.fromtimestamp(file_mtime_epoch)
-    
-    time_threshold = datetime.now() - timedelta(minutes=threshold_minutes)
-    
-    print(f"File Mod Time: {file_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Threshold Time: {time_threshold.strftime('%Y-%m-%d %H:%M:%S')} ({threshold_minutes} min ago)")
-    
-    if file_mtime < time_threshold:
-        return False
-    return True
+# --- HANDLERS ---
+def timeout_handler(signum, frame):
+    """Kills the process if it hangs beyond 55 seconds."""
+    print(f"\n⏰ TIMEOUT at {get_timestamp()}.")
+    sys.exit(1)
 
-def format_size(size_bytes):
-    """Converts size in bytes to a human-readable format (KB, MB)."""
-    if size_bytes >= 1024 * 1024:
-        return f"{size_bytes / (1024 * 1024):.2f} MB"
-    elif size_bytes >= 1024:
-        return f"{size_bytes / 1024:.2f} KB"
-    else:
-        return f"{size_bytes} bytes"
+class ProcessLock:
+    """Uses a file lock to prevent concurrent execution of the same mode."""
+    def __init__(self, mode):
+        self.lock_file = BASE_DIR / f"lookout_connect_{mode}.lock"
+        self.fd = open(self.lock_file, 'w')
 
-def resize_image(original_path, target_resolution, script_directory):
-    """
-    Resizes the image, compares file sizes, and returns the ABSOLUTE path to the smaller file.
-    All new files are created in the script_directory.
-    """
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Files are created using ABSOLUTE paths inside the script's directory
-    temp_resized_filename = os.path.join(script_directory, f"temp_resized_{timestamp}.jpg")
-    
-    print(f"\n📐 Resizing image to {target_resolution[0]}x{target_resolution[1]}...")
-    
-    try:
-        original_size = os.path.getsize(original_path)
-        print(f"   Original File Size: {format_size(original_size)}")
-        
-        # 1. Perform Resize and Save to temporary file
-        img = Image.open(original_path)
-        resized_img = img.resize(target_resolution)
-        resized_img.save(temp_resized_filename, "jpeg")
-        resized_size = os.path.getsize(temp_resized_filename)
-        
-        print(f"   Temp Resized Size: {format_size(resized_size)}")
-
-        # 2. Compare Sizes and Select File
-        if original_size <= resized_size:
-            # Original file is smaller or same size: keep original
-            os.remove(temp_resized_filename)
-            print("💡 Optimization: Keeping original file as it is smaller or equal in size.")
-            return original_path # <-- Returns the ABSOLUTE path to the original
-        else:
-            # Resized file is smaller: rename the temporary file to the final output name
-            final_resized_filename = os.path.join(script_directory, f"camera_snapshot_resized_{timestamp}.jpg")
-            os.rename(temp_resized_filename, final_resized_filename)
-            print(f"✅ Optimization: Keeping resized file, saved as {final_resized_filename}.")
-            return final_resized_filename # <-- Returns the ABSOLUTE path to the resized file
-            
-    except Exception as e:
-        print(f"❌ Error during resizing or comparison: {e}")
-        
-        # Attempt to clean up temp file if it exists after failure
-        if os.path.exists(temp_resized_filename):
-            os.remove(temp_resized_filename)
-        
-        return None
-
-def upload_image(file_path, upload_url, content_type):
-    """Uploads the image file using HTTP POST."""
-    
-    print(f"⬆️ Attempting to upload image ({os.path.basename(file_path)}) to API...")
-    # The file_path here is guaranteed to be absolute
-
-    try:
-        with open(file_path, 'rb') as f:
-            file_data = f.read()
-
-        headers = {'Content-Type': content_type}
-
-        response = requests.post(
-            url=upload_url, 
-            data=file_data, 
-            headers=headers
-        )
-        
-        response.raise_for_status() 
-
-        print(f"✅ Success! Image uploaded.")
-        print(f"HTTP Status Code: {response.status_code}")
-        print(f"API Response Body: {response.text}")
-        return True
-
-    except requests.exceptions.HTTPError as http_err:
-        print(f"❌ HTTP Error during upload: {http_err}")
-        print(f"HTTP Status Code: {response.status_code}")
+    def __enter__(self):
         try:
-            api_response = response.text
-        except Exception:
-            api_response = "N/A (could not decode response body)"
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return self
+        except IOError:
+            self.fd.close()
+            sys.exit(0)
 
-        print(f"API Response Body: {api_response}")
-        return False
-        
-    except requests.exceptions.RequestException as req_err:
-        print(f"❌ Request Error during upload: {req_err}")
-        return False
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        self.fd.close()
 
-# --- Main Execution ---
+# --- CORE FUNCTIONS ---
+
+def log_result(filename, api_response_text):
+    """Logs detections and manages 5MB log rotation."""
+    try:
+        data = json.loads(api_response_text)
+        count = len(data.get('results', []))
+        if count > 0:
+            FTP_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > 5 * 1024 * 1024:
+                LOG_FILE.replace(LOG_FILE.with_suffix('.old.txt'))
+            
+            log_line = f"{get_timestamp()}|{filename}|Detections: {count}|{json.dumps(data, separators=(',', ':'))}\n"
+            with open(LOG_FILE, 'a') as f: f.write(log_line)
+            print(f"🔥 Detection logged! ({count} found)")
+            return count
+    except Exception as e: print(f"⚠️ Logging error: {e}")
+    return 0
+
+def process_and_upload(file_path, is_api_mode=False, do_resize=False):
+    """Uploads image, optionally resizing it first. Handles 3-attempt retry logic."""
+    temp_resized = None
+    final_file = file_path
+
+    try:
+        if do_resize:
+            ts = get_timestamp()
+            temp_resized = BASE_DIR / f"tmp_proc_{ts}.jpg"
+            with Image.open(file_path) as img:
+                img.thumbnail(TARGET_RES, Image.Resampling.LANCZOS)
+                img.save(temp_resized, "JPEG", quality=80)
+            
+            # Only use resized if it actually saved space
+            if temp_resized.stat().st_size < file_path.stat().st_size:
+                final_file = temp_resized
+            print(f"📡 Resize Enabled: Source {get_human_readable_size(file_path.stat().st_size)} -> Final {get_human_readable_size(final_file.stat().st_size)}")
+        else:
+            print(f"📡 Resize Disabled: Uploading original {get_human_readable_size(file_path.stat().st_size)}")
+
+        delay = 5
+        for attempt in range(1, 4):
+            try:
+                print(f"📡 Attempt {attempt} at {get_timestamp()}: Uploading {file_path.name}...")
+                with open(final_file, 'rb') as f:
+                    r = requests.post(UPLOAD_URL, data=f, headers={'Content-Type': 'image/jpeg'}, timeout=20)
+                    r.raise_for_status()
+                    if log_result(file_path.name, r.text) > 0 and is_api_mode:
+                        FTP_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(file_path, FTP_ARCHIVE_DIR / file_path.name)
+                    return True
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt} failed: {e}")
+                if attempt < 3:
+                    time.sleep(delay)
+                    delay *= 2
+        print(f"❌ Upload failed for {file_path.name}")
+    finally:
+        if temp_resized and temp_resized.exists(): temp_resized.unlink()
+        if is_api_mode and file_path.exists(): file_path.unlink()
+    return False
+
+# --- MODES ---
+
+def run_api_mode(do_resize):
+    """Triggers camera API snapshot and uploads."""
+    ts = get_timestamp()
+    print(f"🚀 Mode: API, {ts}")
+    download_path = BASE_DIR / f"SNAP_{ts}.jpg"
+    snap_url = f"http://{CAM_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&rs={random.randint(100,999)}&user={CAM_USER}&password={CAM_PASS}"
+    try:
+        with requests.get(snap_url, timeout=15, stream=True) as r:
+            r.raise_for_status()
+            with open(download_path, 'wb') as f: shutil.copyfileobj(r.raw, f)
+        process_and_upload(download_path, is_api_mode=True, do_resize=do_resize)
+    except Exception as e: print(f"⚠️ Camera Error: {e}")
+
+def run_ftp_mode(do_resize):
+    """Processes the newest image from the FTP source path."""
+    print(f"📁 Mode: FTP, {get_timestamp()}")
+    if not SOURCE_PATH.exists(): return
+    files = [f for f in SOURCE_PATH.iterdir() if f.suffix.lower() in ('.jpg', '.jpeg')]
+    if not files: return
+    
+    newest = max(files, key=lambda f: f.stat().st_mtime)
+    file_id = f"{newest.name}|{newest.stat().st_size}|{newest.stat().st_mtime}"
+    if STATE_FILE.exists() and STATE_FILE.read_text().strip() == file_id:
+        print("💤 Already processed.")
+        return
+
+    if process_and_upload(newest, is_api_mode=False, do_resize=do_resize):
+        STATE_FILE.write_text(file_id)
+        print("✅ State updated.")
 
 if __name__ == "__main__":
-    
-    # --- STEP 1: Find Newest File & Check Time ---
-    if not os.path.exists(SOURCE_PATH):
-        print(f"❌ Error! Source path does not exist: {SOURCE_PATH}")
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=["api", "ftp"])
+    parser.add_argument("--resize", action="store_true", help="Enable image resizing before upload (Default: False)")
+    args = parser.parse_args()
 
-    original_file = find_newest_image(SOURCE_PATH)
-    file_to_upload = None
-
-    if not original_file:
-        print(f"❌ Error! No image file found in {SOURCE_PATH}.")
-        sys.exit(0)
-    
-    print(f"🔍 Found newest image: {os.path.basename(original_file)} (Path: {original_file})")
-
-    if not check_timestamp(original_file, TIME_THRESHOLD_MINUTES):
-        print(f"--- Time Check Failed ---")
-        print(f"The newest file is older than {TIME_THRESHOLD_MINUTES} minutes. Exiting.")
-        sys.exit(0)
+    with ProcessLock(args.mode):
+        if sys.platform != "win32":
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(55)
         
-    print("--- Time Check Passed ---")
-    
-    # --- STEP 2: Resize and Optimize ---
-    file_to_upload = resize_image(original_file, TARGET_RESOLUTION, SCRIPT_DIR)
-    
-    if not file_to_upload:
-        print("❌ Script terminated due to resizing/optimization failure.")
-        sys.exit(1)
-
-    # --- STEP 3 & 4: Upload and Guaranteed Cleanup ---
-    upload_success = False
-
-    try:
-        # Perform the upload
-        upload_success = upload_image(file_to_upload, UPLOAD_URL, CONTENT_TYPE)
-        
-    finally:
-        # Guaranteed cleanup block
-        print("\n--- Cleanup ---")
-        
-        if file_to_upload and os.path.exists(file_to_upload):
-            # Compare absolute paths to ensure we only delete files created by the script.
-            if os.path.abspath(file_to_upload) != os.path.abspath(original_file):
-                print(f"🗑️ Guaranteed deletion of processed file: {os.path.basename(file_to_upload)}...")
-                try:
-                    os.remove(file_to_upload)
-                    print("File deleted successfully.")
-                except OSError as e:
-                    print(f"Error deleting file: {e}")
-            else:
-                print("Retained original source file (no deletion necessary).")
+        if args.mode == "api":
+            run_api_mode(args.resize)
         else:
-            print("No processed file found for final cleanup.")
-            
-    print(f"\n--- Script Finished (Upload Success: {upload_success}) ---")
+            run_ftp_mode(args.resize)
