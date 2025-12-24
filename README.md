@@ -1,94 +1,114 @@
-# 📸 Image Upload Utility (Absolute Path Version)
+# lookoutConnect.py
 
-This Python script monitors a specified directory for new image files, optimizes the newest file by conditionally resizing it, and uploads the resulting file via an HTTP POST request to a configured API endpoint. It ensures all temporary files are cleaned up reliably, regardless of upload success or failure.
+**lookoutConnect.py** is a lightweight, production-grade Python middleware designed to bridge standard IP cameras (such as Axis, Hikvision, or Dahua) with the **LookOut Wildfire Detection SaaS**.
 
-## 📝 Prerequisites
+It is optimized for edge computing, capable of running on a Raspberry Pi, Mini PC, or any Linux/Windows machine directly connected to the camera network.
 
-You must have Python 3.x installed on your system.
+---
 
-This script relies on two external Python libraries:
+## 🚀 Key Features
 
-  * **`requests`**: For robust handling of the HTTP POST upload.
-  * **`Pillow` (PIL)**: For image manipulation and resizing.
+* **Dual Operation Modes:** Supports both **API (Pull)** for active snapshot triggering and **FTP (Push)** for monitoring uploaded files.
+* **Edge Optimized:** Extremely low resource footprint; ideal for remote hardware.
+* **Network Resilience:** Implements an **Exponential Backoff** retry algorithm and strict timeouts to handle unstable remote links (cellular/radio).
+* **Smart Resizing:** Optional `--resize` flag to downscale images to 1080p, reducing bandwidth costs while maintaining detection accuracy.
+* **Process Safety:** Built-in **Process Locking** (prevents overlapping runs) and a **Watchdog Timer** (kills hung processes).
+* **Automated Logging:** Self-rotating detection logs and local image archiving for forensic evidence.
 
-You can install these dependencies using `pip`:
+---
 
+## 📂 System Architecture
+
+The script sits between your local camera hardware and the **LookOut Wildfire Detection SaaS**, managing the heavy lifting of image optimization and transmission reliability.
+
+---
+
+## 🛠️ Installation
+
+1. **Clone the repository** (or download `lookoutConnect.py`).
+2. **Install Dependencies:**
 ```bash
-pip install requests pillow
+pip install Pillow requests python-dotenv
+
 ```
 
-## ⚙️ Configuration
 
-Before running the script, you must configure the following variables within the `upload_newest_image.py` file:
+3. **Configure Environment:** Create a `.env` file in the same directory (see [Configuration](https://www.google.com/search?q=%23configuration) below).
 
-| Variable | Location | Description |
-| :--- | :--- | :--- |
-| `SOURCE_PATH` | Top of script | **ABSOLUTE PATH** to the directory where your camera/application saves its image files. **(CRITICAL)** |
-| `UPLOAD_URL` | Top of script | The target API endpoint URL for the HTTP POST upload (e.g., `https://lax.pop.roboticscats.com/api/detects?apiKey=...`). |
-| `TARGET_RESOLUTION` | Top of script | The desired image resolution for resizing (e.g., `(1920, 1080)`). |
-| `TIME_THRESHOLD_MINUTES`| Top of script | The maximum age (in minutes) an image can be to be considered "new" and processed. Older files are ignored. |
+---
 
-## 🚀 Usage
+## ⚙️ Configuration (.env)
 
-### 1\. Manual Execution
+Define your specific camera and API settings in a `.env` file:
 
-Run the script directly from your terminal:
+```env
+# LookOut API Settings
+LOOKOUT_API_KEY=your_LookOut_camera_endpoint_after_apiKey=
 
-```bash
-python3 upload_newest_image.py
+# Camera Credentials (API Mode)
+CAMERA_IP=192.168.1.100
+CAMERA_USER=admin
+CAMERA_PASS=your_password
+
+# Folder Paths (FTP Mode)
+SOURCE_PATH=/home/user/ftp/camera_inbox
+FTP_ARCHIVE_DIR=/home/user/ftp/detections_archive
+
 ```
 
-### 2\. Automated Scheduling (Cron Job)
+---
 
-To run this script automatically every two minutes (as discussed previously), you should set up a cron job.
+## 📖 How to Use
 
-1.  **Open your crontab:**
+### 1. API Mode (Pull)
 
-    ```bash
-    crontab -e
-    ```
+Best if your camera provides an HTTP snapshot URL. The script will request an image directly from the camera.
 
-2.  **Add the following line:**
-    You must use the **absolute path** to both the Python executable and your script, and it is highly recommended to redirect all output to a log file to avoid filling up the system mail queue.
+```bash
+python3 lookoutConnect.py api
 
-    ```bash
-    # Run the script every two minutes (*/2)
-    */2 * * * * /usr/bin/python3 /path/to/your/upload_newest_image.py >> /var/log/image_upload.log 2>&1
-    ```
+```
 
-    *(Note: Replace `/usr/bin/python3` and `/path/to/your/upload_newest_image.py` with your actual absolute paths.)*
+### 2. FTP Mode (Push)
 
-## 💡 Processing Logic & Safety
+Best if your camera is configured to upload images to a local folder. The script monitors the `SOURCE_PATH` for the newest file.
 
-The script performs the following sequence of operations to ensure reliable and optimized uploads:
+```bash
+python3 lookoutConnect.py ftp
 
-1.  **File Discovery & Time Check:**
+```
 
-      * Finds the newest image (`*.jpg`/`*.jpeg`) in the `SOURCE_PATH`.
-      * **Breaks and does nothing** if the newest image is older than `TIME_THRESHOLD_MINUTES`.
+### 3. Optional Resizing
 
-2.  **Resize and Optimization:**
+To save bandwidth, add the `--resize` flag to downscale the image to 1080p before uploading:
 
-      * The script attempts to resize the image to `TARGET_RESOLUTION`.
-      * It compares the **file size** of the **original image** against the **resized image**.
-      * **Optimization:** It selects the file with the **smaller size** for upload, discarding the larger one. This minimizes bandwidth consumption.
+```bash
+python3 lookoutConnect.py api --resize
 
-3.  **Upload:**
+```
 
-      * Performs an HTTP POST request using the `requests` library with the optimized image file.
+---
 
-4.  **Guaranteed Cleanup (Absolute Safety):**
+## 📊 Outputs
 
-      * The script uses a `try...finally` block to ensure that any file **created by the script** (i.e., the resized image) is **deleted** from the disk, regardless of whether the upload was successful or failed.
-      * **The original source file in the `SOURCE_PATH` is never deleted.**
+* **`detectionResults.txt`**: Located in the archive directory. Records every detection (timestamp, filename, and AI metadata). Automatically rotates when it reaches 5MB.
+* **Archive Folder**: Images that result in a positive detection are copied here for permanent storage.
+* **`last_processed.ptr`**: Tracks the state in FTP mode to ensure no image is uploaded twice.
 
------
+---
 
-## 🛑 Troubleshooting
+## ⏲️ Automation (Crontab)
 
-| Error | Likely Cause | Solution |
-| :--- | :--- | :--- |
-| `ModuleNotFoundError: No module named 'requests'` | Dependencies are not installed. | Run `pip install requests pillow`. |
-| `FileNotFoundError` or unexpected behavior in Cron | Relative paths used in cron or misconfiguration of `SOURCE_PATH`. | Ensure all paths (`SOURCE_PATH`, Python executable, script path) are **absolute paths** (starting with `/`). |
-| `requests.exceptions.HTTPError: 400 Bad Request` | The API rejected the upload. | Verify `UPLOAD_URL` is correct, including the `apiKey`. The API may also reject the image if the quality/format is unexpected (unlikely, but possible). |
-| Script doesn't seem to run | Cron environment issues. | Check the cron log file (`/var/log/image_upload.log` in the example above) for Python error messages or permission issues. |
+To run the script every minute, add the following to your crontab (`crontab -e`):
+
+```bash
+# Example: Run FTP mode every minute with resizing enabled
+* * * * * /usr/bin/python3 /path/to/lookoutConnect.py ftp --resize >> /path/to/cron.log 2>&1
+
+```
+
+---
+
+## 📝 License
+
+This project is provided as freeware for use with the LookOut Wildfire Detection SaaS.
