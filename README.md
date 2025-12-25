@@ -33,7 +33,7 @@ pip install Pillow requests python-dotenv
 ```
 
 
-3. **Configure Environment:** Create a `.env` file in the same directory (see [Configuration](https://www.google.com/search?q=%23configuration) below).
+3. **Configure Environment:** Create a `.env` file in the same directory (see [Configuration] below).
 
 ---
 
