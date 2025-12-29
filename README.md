@@ -1,58 +1,75 @@
-# lookoutConnect.py
+# LookoutConnect.py
 
-**lookoutConnect.py** is a lightweight, production-grade Python middleware designed to bridge standard IP cameras (such as Axis, Hikvision, or Dahua) with the **LookOut Wildfire Detection SaaS**.
+**LookoutConnect.py** is a high-performance, lightweight Python middleware designed to bridge standard IP cameras (Axis, Hikvision, Dahua, etc.) with the **LookOut AI Wildfire Detection Platform**.
 
-It is optimized for edge computing, capable of running on a Raspberry Pi, Mini PC, or any Linux/Windows machine directly connected to the camera network.
-
----
-
-## 🚀 Key Features
-
-* **Dual Operation Modes:** Supports both **API (Pull)** for active snapshot triggering and **FTP (Push)** for monitoring uploaded files.
-* **Edge Optimized:** Extremely low resource footprint; ideal for remote hardware.
-* **Network Resilience:** Implements an **Exponential Backoff** retry algorithm and strict timeouts to handle unstable remote links (cellular/radio).
-* **Smart Resizing:** Optional `--resize` flag to downscale images to 1080p, reducing bandwidth costs while maintaining detection accuracy.
-* **Process Safety:** Built-in **Process Locking** (prevents overlapping runs) and a **Watchdog Timer** (kills hung processes).
-* **Automated Logging:** Self-rotating detection logs and local image archiving for forensic evidence.
+The latest version introduces critical emergency alerting via **Pushover** and advanced manual file handling, making it a professional-grade tool for wildfire sentinels.
 
 ---
 
-## 📂 System Architecture
+## 🚀 Advanced Capabilities
 
-The script sits between your local camera hardware and the **LookOut Wildfire Detection SaaS**, managing the heavy lifting of image optimization and transmission reliability.
+* **Network Resilience:** Optimized for remote sites using cellular or radio links. Employs an **Exponential Backoff** algorithm to retry failed uploads without overwhelming unstable connections.
+* **Smart Bandwidth Management:** Includes an optional `--resize` flag to downscale images to 1080p using high-quality Lanczos resampling, saving data costs on metered links.
+* **System Integrity:** Built-in **Process Locking** prevents concurrent execution, while a **Watchdog Timer** kills hung processes after 55 seconds (default value) to ensure system availability.
+* **Pushover Emergency Alerts:** Integrated support for the Pushover API. AI detections trigger **Priority 2 (Emergency)** mobile alerts that bypass silent modes and repeat until acknowledged.
+* **Manual Override:** Allows users to specify a single file for upload using the `--file` flag, bypassing automatic polling for testing or forensic re-analysis.
+
+---
+
+## 📂 Outputs & Forensic Logs
+
+* **`detectionResults.txt`**: A persistent heartbeat log recording timestamps, filenames, and AI metadata (coordinates/scores). Automatically rotates at 5MB.
+* **Image Archiving**: In **API Mode**, images that result in a positive detection are automatically copied to the archive directory for forensic evidence.
+* **State Tracking (`.ptr`)**: Maintains a pointer to the last processed file in FTP mode to prevent duplicate uploads after a script restart or system reboot.
+
+---
+
+## 💻 Deployment
+
+LookoutConnect is designed for the **Edge**. Its lightweight footprint makes it ideal for:
+
+* **Raspberry Pi** (All models)
+* **Mini PCs** (Intel NUC, etc.)
+* **Existing Field PCs** directly connected to the camera network.
 
 ---
 
 ## 🛠️ Installation
 
-1. **Clone the repository** (or download `lookoutConnect.py`).
-2. **Install Dependencies:**
+1. **Install Dependencies:**
 ```bash
 pip install Pillow requests python-dotenv
 
 ```
 
 
-3. **Configure Environment:** Create a `.env` file in the same directory (see [Configuration] below).
+2. **Configure Environment:** Create a `.env` file in the script directory (see below).
 
 ---
 
 ## ⚙️ Configuration (.env)
 
-Define your specific camera and API settings in a `.env` file:
-
 ```env
-# LookOut API Settings
-LOOKOUT_API_KEY=your_LookOut_camera_endpoint_after_apiKey=
 
 # Camera Credentials (API Mode)
+CAMERA_NAME=Mountain-Watch-01
 CAMERA_IP=192.168.1.100
 CAMERA_USER=admin
 CAMERA_PASS=your_password
 
-# Folder Paths (FTP Mode)
-SOURCE_PATH=/home/user/ftp/camera_inbox
-FTP_ARCHIVE_DIR=/home/user/ftp/detections_archive
+# Paths (FTP Mode)
+SOURCE_PATH=/home/pi/ftp/images
+FTP_ARCHIVE_DIR=/home/pi/ftp/archive
+
+# LookOut Wildfire Detection SDaaS Camera Endpoint (API key)
+LOOKOUT_API_KEY=your_api_key
+
+# Pushover Alerts
+PUSHOVER_APP_TOKEN=your_app_token
+PUSHOVER_USER_KEY=your_user_key
+
+# Watchdog Timer Threshold
+TIMER_THRESHOLD=55
 
 ```
 
@@ -60,55 +77,43 @@ FTP_ARCHIVE_DIR=/home/user/ftp/detections_archive
 
 ## 📖 How to Use
 
-### 1. API Mode (Pull)
+### 1. Choose Your Mode
 
-Best if your camera provides an HTTP snapshot URL. The script will request an image directly from the camera.
+* **API Mode**: The script "pulls" a snapshot from the camera via HTTP.
+* **FTP Mode**: The script "watches" a folder for images "pushed" by the camera or NVR.
+
+### 2. Execute
+
+Run the script manually or via **Cron job** every minute:
+
+**Standard API Run:**
 
 ```bash
-python3 lookoutConnect.py api
+python3 LookoutConnect.py api
 
 ```
 
-### 2. FTP Mode (Push)
-
-Best if your camera is configured to upload images to a local folder. The script monitors the `SOURCE_PATH` for the newest file.
+**FTP Mode with Bandwidth Saving:**
 
 ```bash
-python3 lookoutConnect.py ftp
+python3 LookoutConnect.py ftp --resize
 
 ```
 
-### 3. Optional Resizing
-
-To save bandwidth, add the `--resize` flag to downscale the image to 1080p before uploading:
+**Manual File Upload (Override):**
 
 ```bash
-python3 lookoutConnect.py api --resize
+python3 LookoutConnect.py ftp --file /path/to/test_fire.jpg
 
 ```
-
----
-
-## 📊 Outputs
-
-* **`detectionResults.txt`**: Located in the archive directory. Records every detection (timestamp, filename, and AI metadata). Automatically rotates when it reaches 5MB.
-* **Archive Folder**: Images that result in a positive detection are copied here for permanent storage.
-* **`last_processed.ptr`**: Tracks the state in FTP mode to ensure no image is uploaded twice.
 
 ---
 
 ## ⏲️ Automation (Crontab)
 
-To run the script every minute, add the following to your crontab (`crontab -e`):
+To automate, run `crontab -e` and add:
 
 ```bash
-# Example: Run FTP mode every minute with resizing enabled
-* * * * * /usr/bin/python3 /path/to/lookoutConnect.py ftp --resize >> /path/to/cron.log 2>&1
+* * * * * /usr/bin/python3 /absolute/path/to/LookoutConnect.py ftp --resize >> /var/log/lookout.log 2>&1
 
 ```
-
----
-
-## 📝 License
-
-This project is provided as freeware for use with the LookOut Wildfire Detection SaaS.
