@@ -56,20 +56,28 @@ CAMERA_NAME=Mountain-Watch-01
 CAMERA_IP=192.168.1.100
 CAMERA_USER=admin
 CAMERA_PASS=your_password
+CAMERA_LOC=lat,long
 
 # Paths (FTP Mode)
-SOURCE_PATH=/home/pi/ftp/images
-FTP_ARCHIVE_DIR=/home/pi/ftp/archive
+SOURCE_PATH=/home/user/ftp/images
+ARCHIVE_DIR=/home/user/ftp/archive
 
 # LookOut Wildfire Detection SDaaS Camera Endpoint (API key)
 LOOKOUT_API_KEY=your_api_key
+
+# ntfy API Key
+NTFY_TOPIC=your_topic
 
 # Pushover Alerts
 PUSHOVER_APP_TOKEN=your_app_token
 PUSHOVER_USER_KEY=your_user_key
 
 # Watchdog Timer Threshold
-TIMER_THRESHOLD=55
+TIMER_REQUESTS=25
+TIMER_WATCHDOG=55
+
+# OpenWeather
+OPENWEATHER_API_KEY=your_api_key
 
 ```
 
