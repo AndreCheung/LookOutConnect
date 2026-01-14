@@ -1,5 +1,5 @@
 #! python3
-# Date: 2026015, add ntfy.sh notification
+# Date: 20260105, add ntfy.sh notification
 
 import os, pathlib, requests, logging
 from datetime import datetime
