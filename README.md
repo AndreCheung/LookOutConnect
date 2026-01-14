@@ -52,8 +52,8 @@ pip install Pillow requests python-dotenv
 ```env
 
 # Camera Credentials (API Mode)
-CAMERA_NAME=Mountain-Watch-01
-CAMERA_IP=192.168.1.100
+CAMERA_NAME=Camera2
+CAMERA_IP=192.168.20.25
 CAMERA_USER=admin
 CAMERA_PASS=your_password
 CAMERA_LOC=lat,long
