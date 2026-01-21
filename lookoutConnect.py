@@ -1,79 +1,85 @@
 #! python3
-# Date: 20260106, add Windows OS, ntfy.sh and OpenWeather support
+# LookoutConnect.py | 2026-01-21
+# Purpose: Bridge IP Cameras to LookOut AI for Wildfire Detection.
+# Resilience: Includes Watchdog Timer, Exponential Backoff, and Multi-cycle Logic.
 
 import os, sys, json, shutil, pathlib, argparse, random, requests, time, signal, logging, threading
 from datetime import datetime
 from dotenv import load_dotenv
 from requests.auth import HTTPDigestAuth
-from PIL import Image, ImageDraw, ImageFont  # Add ImageDraw and ImageFont
-import openWeather # Comment out if NO OpenWeather
-import ntfy # Comment out if NO ntfy.sh
+from PIL import Image, ImageDraw, ImageFont
 
-# Conditional import for OS-specific locking
+# Support Modules.
+import openWeather
+import ntfy
+import acsPro
+import pushover
+
+# OS-Specific File Locking to prevent race conditions
 if sys.platform == "win32":
     import msvcrt
 else:
     import fcntl
 
 load_dotenv()
-# Configuration for standard output logging
+# Log rotation and detail level handled by logging module
 logging.basicConfig(filename='log.txt', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-# logging.disable(logging.ERROR)
+logging.disable(logging.DEBUG)
 
-# --- CONFIGURATION ---
-CAM_IP = os.getenv("CAMERA_IP")
-CAM_USER = os.getenv("CAMERA_USER")
-CAM_PASS = os.getenv("CAMERA_PASS")
-CAM_NAME = os.getenv("CAMERA_NAME")
-RAW_LOC = os.getenv('CAMERA_LOC', '0,0')
-CAM_LOC = tuple(float(x.strip()) for x in RAW_LOC.split(','))
-API_KEY = os.getenv("LOOKOUT_API_KEY")
-UPLOAD_URL = f"https://lax.pop.roboticscats.com/api/detects?apiKey={API_KEY}"
+# --- GLOBAL CONFIGURATION ---
+CAM_IP      = os.getenv("CAMERA_IP")
+CAM_USER    = os.getenv("CAMERA_USER")
+CAM_PASS    = os.getenv("CAMERA_PASS")
+CAM_NAME    = os.getenv("CAMERA_NAME")
+RAW_LOC     = os.getenv('CAMERA_LOC', '0,0')
+CAM_LOC     = tuple(float(x.strip()) for x in RAW_LOC.split(','))
+API_KEY     = os.getenv("LOOKOUT_API_KEY")
+UPLOAD_URL  = f"https://lax.pop.roboticscats.com/api/detects?apiKey={API_KEY}"
 SOURCE_PATH = pathlib.Path(os.getenv("SOURCE_PATH") or ".")
 ARCHIVE_DIR = pathlib.Path(os.getenv("ARCHIVE_DIR") or "./archive")
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-LOG_FILE = ARCHIVE_DIR / "detectionResults.txt"
-STATE_FILE = BASE_DIR / "last_processed.ptr"
-APP_TOKEN = os.getenv("PUSHOVER_APP_TOKEN")
-USER_KEY = os.getenv("PUSHOVER_USER_KEY")
+BASE_DIR    = pathlib.Path(__file__).parent.resolve()
+LOG_FILE    = ARCHIVE_DIR / "detectionResults.txt"
+STATE_FILE  = BASE_DIR / "last_processed.ptr" # Tracks unique file IDs
 REQUESTS_TIMER = int(os.getenv("TIMER_REQUESTS", 25))
 WATCHDOG_TIMER = int(os.getenv("TIMER_WATCHDOG", 55))
-TARGET_RES = (1920, 1080)
+TARGET_RES  = (1920, 1080)
 
-# Comment out below if NO nfty.sh
+APP_TOKEN   = os.getenv("PUSHOVER_APP_TOKEN")
+USER_KEY    = os.getenv("PUSHOVER_USER_KEY")
 NTFY_TOPIC = os.getenv("NTFY_TOPIC")
-# Comment out below if NO OpenWeather
 OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY')
+ACSPro_IP = os.getenv("AXIS_IP")
+ACSPro_USER = os.getenv("AXIS_USER")
+ACSPro_PASS = os.getenv("AXIS_PASS")
+ACSPro_RULE = os.getenv("AXIS_RULE")
 
-# --- TOOLS ---
+# --- UTILITIES ---
+
 def get_timestamp(space=False):
-    if space:
-        return datetime.now().strftime("%Y-%m-%d %H-%M-%S") # Replaced : with - for Windows filename compatibility
-    else:
-        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    """Generates standard timestamps. Space=True used for forensic logs."""
+    fmt = "%Y-%m-%d %H-%M-%S" if space else "%Y-%m-%d_%H-%M-%S"
+    return datetime.now().strftime(fmt)
 
 def stop_script():
-    logging.error(f'â° TIMEOUT: Script exceeded {WATCHDOG_TIMER}s limit.')
-    os._exit(1) # Force exit main thread
+    """Watchdog: Forces script termination if a network request hangs indefinitely."""
+    logging.error(f'TIMEOUT: Process hung for {WATCHDOG_TIMER}s. Hard exit.')
+    os._exit(1)
 
-# --- WINDOWS COMPATIBLE LOCKING ---
 class ProcessLock:
+    """Ensures only one instance of the script (by mode) runs at a time."""
     def __init__(self, mode):
         self.lock_file = BASE_DIR / f"lookout_connect_{mode}.lock"
-        # Open with 'a' to ensure file exists, then lock
         self.fd = open(self.lock_file, 'w')
 
     def __enter__(self):
         try:
             if sys.platform == "win32":
-                # Seek to start and try to lock 1 byte. 
-                # LK_NBLCK is Non-blocking lock
                 msvcrt.locking(self.fd.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return self
         except (IOError, OSError):
-            logging.warning("Process already running. Skipping...")
+            logging.warning("Instance already running. Skipping this execution cycle.")
             self.fd.close()
             sys.exit(0)
 
@@ -87,99 +93,96 @@ class ProcessLock:
         finally:
             self.fd.close()
 
-# --- ALERTING ---
+# --- ALERTING & LOGGING ---
+
 def drawbbox(file_path, bbox_list, annotated_path):
-    # --- Drawing Bounding Box(es) Logic ---
+    """Overlays red bounding boxes on detected smoke/fire for visual verification."""
     try:
         with Image.open(file_path) as img:
             annotated_img = img.copy()
             draw = ImageDraw.Draw(annotated_img)
-            width, height = annotated_img.size
-                    
+            w, h = annotated_img.size
             for box in bbox_list:
-                # 1. Extract and clamp coordinates
-                l = max(0, min(width  - 1, box.get("left", 0)))
-                t = max(0, min(height - 1, box.get("top", 0)))
-                r = max(0, min(width  - 1, box.get("right", 0)))
-                b = max(0, min(height - 1, box.get("bottom", 0)))
-                        
-                # 2. Draw the main Bounding Box (thicker for high res)
+                l = max(0, min(w - 1, box.get("left", 0)))
+                t = max(0, min(h - 1, box.get("top", 0)))
+                r = max(0, min(w - 1, box.get("right", 0)))
+                b = max(0, min(h - 1, box.get("bottom", 0)))
                 draw.rectangle([l, t, r, b], outline="red", width=6)
-                
-            # Save the annotated image temporarily.
-            # annotated_path = BASE_DIR / "temp_annotated.jpg"
             annotated_img.save(annotated_path, "JPEG", quality=90)
-
     except Exception as e:
-        logging.error(f"? Drawing Error: {e}")
-    # --- Drawing Logic End ---
+        logging.error(f"Image Annotation Error: {e}")
 
-def send_pushover_alert(image_path, camera_name, detection_time):
-    if not APP_TOKEN or not USER_KEY:
-        logging.warning("â ï¸ Pushover keys missing")
-        return
-    
-    message = ''
-    # Comment out below if NO OpenWeather
-    data = openWeather.currentWeather()
-    message = (f"It is {data['description']} at {data['location_name']}. The temp is {data['temperature_c']}\u00B0c and humidity is {data['humidity_percent']}%.")
-
-    payload = {
-        "token": APP_TOKEN, 
-        "user": USER_KEY,
-        "title": f"ð¥ LookOut alert: {camera_name}, {detection_time}",
-        "message": f"Please check the image.\n{message}",
-        "url": f"https://www.google.com/maps?q={CAM_LOC}",
-        "url_title": "View camera location",
-        "priority": 2, 
-        "retry": 60, 
-        "expire": 3600, 
-        "sound": "persistent" 
-    }
-
-    try:
-        with open(image_path, "rb") as image_file:
-            files = {"attachment": ("alert.jpg", image_file, "image/jpeg")}
-            requests.post("https://api.pushover.net/1/messages.json", data=payload, files=files, timeout=REQUESTS_TIMER)
-            logging.info("â Pushover alert dispatched.")
-    except Exception as e:
-        logging.error(f"â Pushover Exception: {e}")
-
-# --- CORE FUNCTIONS (Log & Process) ---
 def log_result(file_path, api_response_text):
+    """Processes AI response, writes logs, and triggers modular alerts."""
     try:
         data = json.loads(api_response_text)
         bbox_list = data.get('results', [])
         count = len(bbox_list)
         
         if count > 0:
+            alert_time = get_timestamp(True)
             ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-
-            # Standard Logging
+            # Log Rotation at 5MB
             if LOG_FILE.exists() and LOG_FILE.stat().st_size > 5 * 1024 * 1024:
                 LOG_FILE.replace(LOG_FILE.with_suffix('.old.txt'))
-            log_line = f"{get_timestamp('space')}, SNAP_{get_timestamp()}.jpg, #Detection(s): {count}, {bbox_list}\n"
+            
+            log_line = f"{get_timestamp(True)}, {file_path.name}, Detects: {count}, {bbox_list}\n"
             with open(LOG_FILE, 'a') as f: f.write(log_line)
-            logging.info(f"? OBJECT DETECTED: {count} results found.")
+            logging.info(f"FIRE DETECTED: {count} findings.")
 
-            # Drawing Bounding Box(es) to BASE_DIR / 'temp_annotated.jpg'
+            # Prepare annotated image for alerts
             annotated_path = BASE_DIR / 'temp_annotated.jpg'
             drawbbox(file_path, bbox_list, annotated_path)
 
-            # Alerting (Send the annotated image via Pushover). Comment out below if NO Pushover
             if annotated_path and annotated_path.exists():
-                send_pushover_alert(annotated_path, CAM_NAME, get_timestamp('space'))
-                # Alerting (send the annotated image via ntfy.sh). Commet out below if NO ntfy.sh
-                ntfy.send_ntfy_alert(annotated_path, CAM_NAME, get_timestamp('space'))
-            
+		        # 1. Fetch weather via module (passing Hub config down)
+                weather_data = openWeather.get_current_weather(CAM_LOC, OPENWEATHER_API_KEY)
+    
+		        # Construct alert message
+                if weather_data:
+                    weather_msg = (f"\nWeather: {weather_data['description']}, "
+                                   f"{weather_data['temperature_c']}C, "
+                                   f"Hum: {weather_data['humidity_percent']}%")
+                else:
+                    weather_msg = ""
+
+                # 2. Dispatch Pushover
+                pushover.send_alert(
+                    token=APP_TOKEN,
+                    user=USER_KEY,
+                    image_path=annotated_path,
+                    title=f"LookOut Alert: {CAM_NAME}, {alert_time}",
+                    message=f"AI detection. Please check.{weather_msg}",
+                    cam_loc=CAM_LOC,
+                )
+                
+                # 3. Dispatch ntfy.sh
+                ntfy.send_alert(
+                    image_path=annotated_path,
+                    topic=NTFY_TOPIC,
+                    camera_name=CAM_NAME,
+                    detection_time=alert_time,
+                    timeout=REQUESTS_TIMER
+                )
+                
+                # 4. ACS Pro (Local Alarm/Siren)
+                # # Passing the specific AXIS credentials defined in the Hub's .env
+                acsPro.send_alert(
+                    axis_ip=ACSPro_IP,
+                    user=ACSPro_USER,
+                    password=ACSPro_PASS,
+                    rule_name=ACSPro_RULE,
+                    seconds=10
+                )
+     
             try: annotated_path.unlink()
             except: pass
-
             return count
-        
     except Exception as e:
-        logging.error(f"?? Logging error: {e}")
+        logging.error(f"Post-Detection Logic Error: {e}")
     return 0
+
+# --- CORE FUNCTIONS (Log & Process) ---
 
 def process_and_upload(file_path, is_api_mode=False, do_resize=False):
     temp_resized = None
@@ -198,7 +201,7 @@ def process_and_upload(file_path, is_api_mode=False, do_resize=False):
  
         for attempt in range(1, 4):
             try:
-                logging.debug(f"ð¡ Attempt {attempt}: Uploading {final_file.name}...")
+                logging.debug(f"Attempt {attempt}: Uploading {final_file.name}...")
                 with open(final_file, 'rb') as f:
                     r = requests.post(UPLOAD_URL, data=f, headers={'Content-Type': 'image/jpeg'}, timeout=REQUESTS_TIMER)
                     r.raise_for_status()
@@ -209,7 +212,7 @@ def process_and_upload(file_path, is_api_mode=False, do_resize=False):
                         shutil.copy2(file_path, ARCHIVE_DIR / archive_path.name)
                     return True
             except Exception as e:
-                logging.warning(f"â ï¸ Attempt {attempt} failed: {e}")
+                logging.warning(f"Attempt {attempt} failed: {e}")
                 time.sleep(attempt * 2)
     finally:
         if temp_resized and temp_resized.exists():
@@ -221,11 +224,11 @@ def process_and_upload(file_path, is_api_mode=False, do_resize=False):
     return False
 
 def run_ftp_mode(do_resize, manual_file=None):
-    logging.info(f"ð Mode: FTP {'(Manual)' if manual_file else '(Auto)'}")
+    logging.info(f"Mode: FTP {'(Manual)' if manual_file else '(Auto)'}")
     if manual_file:
         target_file = pathlib.Path(manual_file).resolve()
         if not target_file.exists():
-            logging.error(f"â File not found: {manual_file}")
+            logging.error(f"File not found: {manual_file}")
             return
     else:
         if not SOURCE_PATH.exists(): return
@@ -236,7 +239,7 @@ def run_ftp_mode(do_resize, manual_file=None):
         # Check Pointer State    
         file_id = f"{target_file.name}|{target_file.stat().st_size}|{target_file.stat().st_mtime}"
         if STATE_FILE.exists() and STATE_FILE.read_text().strip() == file_id:
-            logging.debug("ð¤ Newest file already processed.") 
+            logging.debug("Newest file already processed.") 
             return
 
     if process_and_upload(target_file, is_api_mode=False, do_resize=do_resize):
@@ -245,40 +248,59 @@ def run_ftp_mode(do_resize, manual_file=None):
             STATE_FILE.write_text(file_id)
 
 def run_api_mode(do_resize):
-    logging.info("ð€ Mode: API")
+    logging.info("Mode: API")
     download_path = BASE_DIR / f"SNAP_{CAM_NAME}.jpg"
     # AXIS API
-    # snap_url = f"http://{CAM_IP}/axis-cgi/jpg/image.cgi?resolution=1920x1080"
+    snap_url = f"http://{CAM_IP}/axis-cgi/jpg/image.cgi?resolution=1920x1080"
     # Reolink API
-    snap_url = f"http://{CAM_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&rs={random.randint(100,999)}&user={CAM_USER}&password={CAM_PASS}"
+    # snap_url = f"http://{CAM_IP}/cgi-bin/api.cgi?cmd=Snap&channel=0&rs={random.randint(100,999)}&user={CAM_USER}&password={CAM_PASS}"
     try:
         # Call Axis API
-        # r = requests.get(snap_url, verify=False, auth=HTTPDigestAuth(CAM_USER, CAM_PASS), timeout=REQUESTS_TIMER)
+        r = requests.get(snap_url, verify=False, auth=HTTPDigestAuth(CAM_USER, CAM_PASS), timeout=REQUESTS_TIMER)
         # Call Reolink API
-        r = requests.get(snap_url, timeout=REQUESTS_TIMER)
+        # r = requests.get(snap_url, timeout=REQUESTS_TIMER)
         
         r.raise_for_status()
         with open(download_path, 'wb') as f: f.write(r.content)
         process_and_upload(download_path, is_api_mode=True, do_resize=do_resize)
     except Exception as e:
-        logging.error(f"â ï¸ Camera API Error: {e}")
+        logging.error(f"Camera API Error: {e}")
 
+
+# --- MAIN EXECUTION LOOP ---
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["api", "ftp"])
-    parser.add_argument("--resize", action="store_true")
-    parser.add_argument("--file", type=str)
+    parser = argparse.ArgumentParser(description="LookoutConnect Wildfire Sentinel")
+    parser.add_argument("mode", choices=["api", "ftp"], help="Capture mode")
+    parser.add_argument("--resize", action="store_true", help="Downscale to 1080p")
+    parser.add_argument("--file", type=str, help="Manual file upload override")
+    parser.add_argument("--runs", type=int, default=1, help="Number of 60s duty cycles")
     args = parser.parse_args()
 
-    # Start Watchdog Timer
-    watchdog = threading.Timer(WATCHDOG_TIMER, stop_script)
-    watchdog.daemon = True
-    watchdog.start()
-
+    # Apply process lock for the entire session duration
     with ProcessLock(args.mode):
-        if args.mode == "api":
-            run_api_mode(args.resize)
-        else:
-            run_ftp_mode(args.resize, manual_file=args.file)
-    
-    watchdog.cancel() # Stop timer if script finishes in time
+        for cycle in range(1, args.runs + 1):
+            cycle_start = time.time()
+            
+            # Initialize Watchdog for this specific 60s window
+            watchdog = threading.Timer(WATCHDOG_TIMER, stop_script)
+            watchdog.daemon = True
+            watchdog.start()
+
+            try:
+                if args.mode == "api":
+                    run_api_mode(args.resize)
+                else:
+                    run_ftp_mode(args.resize, manual_file=args.file)
+            except Exception as e:
+                logging.error(f"Cycle {cycle} execution failure: {e}")
+            finally:
+                watchdog.cancel() # Clear watchdog if task finished safely
+
+            # Maintenance of 60-second intervals for multi-run scheduling
+            if cycle < args.runs:
+                elapsed = time.time() - cycle_start
+                wait = max(0, 60 - elapsed)
+                if wait > 0:
+                    time.sleep(wait)
+
+    logging.info("All scheduled runs completed. System standby.")
