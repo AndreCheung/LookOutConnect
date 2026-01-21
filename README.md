@@ -1,127 +1,113 @@
-# LookoutConnect.py
+# LookoutConnect: AI Wildfire Sentinel
 
-**LookoutConnect.py** is a high-performance, lightweight Python middleware designed to bridge standard IP cameras (Axis, Hikvision, Dahua, etc.) with the **LookOut AI Wildfire Detection Platform**.
+**LookoutConnect** is a professional-grade edge computing middleware designed to bridge standard IP cameras with the **LookOut AI Detection Platform**. It automates the process of capturing imagery, performing AI analysis, and triggering a multi-layered alert system.
 
-The latest version introduces critical emergency alerting via **Pushover** and advanced manual file handling, making it a professional-grade tool for wildfire sentinels.
+## 🏗️ Modular Architecture
 
----
+The system is built on a "Hub and Spoke" model. The main controller (**Hub**) manages the detection logic and system integrity, while specialized **Modules** handle external services.
 
-## 🚀 Advanced Capabilities
-
-* **Network Resilience:** Optimized for remote sites using cellular or radio links. Employs an **Exponential Backoff** algorithm to retry failed uploads without overwhelming unstable connections.
-* **Smart Bandwidth Management:** Includes an optional `--resize` flag to downscale images to 1080p using high-quality Lanczos resampling, saving data costs on metered links.
-* **System Integrity:** Built-in **Process Locking** prevents concurrent execution, while a **Watchdog Timer** kills hung processes after 55 seconds (default value) to ensure system availability.
-* **Pushover Emergency Alerts:** Integrated support for the Pushover API. AI detections trigger **Priority 2 (Emergency)** mobile alerts that bypass silent modes and repeat until acknowledged.
-* **Manual Override:** Allows users to specify a single file for upload using the `--file` flag, bypassing automatic polling for testing or forensic re-analysis.
+* **`lookoutConnect.py`**: The central controller. Manages timers, image capture, AI uploads, and process locking.
+* **`pushover.py`**: Dispatches high-priority mobile alerts with image attachments.
+* **`ntfy.sh`**: Provides a secondary, low-latency notification channel.
+* **`openWeather.py`**: Fetches real-time localized weather data for environmental context.
+* **`acsPro.py`**: Interfaces with Axis Camera Station Pro to trigger local pop-up messages, camera liveviews, or alarms.
 
 ---
 
-## 📂 Outputs & Forensic Logs
+## 🚀 Key Features
 
-* **`detectionResults.txt`**: A persistent heartbeat log recording timestamps, filenames, and AI metadata (coordinates/scores). Automatically rotates at 5MB.
-* **Image Archiving**: In **API Mode**, images that result in a positive detection are automatically copied to the archive directory for forensic evidence.
-* **State Tracking (`.ptr`)**: Maintains a pointer to the last processed file in FTP mode to prevent duplicate uploads after a script restart or system reboot.
-
----
-
-## 💻 Deployment
-
-LookoutConnect is designed for the **Edge**. Its lightweight footprint makes it ideal for:
-
-* **Raspberry Pi** (All models)
-* **Mini PCs** (Intel NUC, etc.)
-* **Existing Field PCs** directly connected to the camera network.
+* **Network Resilience**: Uses exponential backoff for uploads to handle unstable remote links.
+* **System Integrity**: A **Watchdog Timer** monitors every execution cycle. If a network socket hangs, the script hard-terminates to allow a fresh start.
+* **Cross-Platform Support**: Uses specialized file-locking (`msvcrt` for Windows, `fcntl` for Linux) to prevent redundant processes.
+* **Forensic Logging**: Self-rotating logs and an image archive provide a permanent audit trail of all AI detections.
+* **Smart Scheduling**: The `--runs` argument allows the script to run for a specific number of 1-minute duty cycles.
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Installation & Setup
 
-1. **Install Dependencies:**
-```bash
-pip install Pillow requests python-dotenv
+### 1. Deploy the Environment
 
-```
-
-
-2. **Configure Environment:** Create a `.env` file in the script directory (see below).
-
----
-
-## ⚙️ Configuration (.env)
-
-```env
-
-# Camera Credentials (API Mode)
-CAMERA_NAME=Camera2
-CAMERA_IP=192.168.20.25
-CAMERA_USER=admin
-CAMERA_PASS=your_password
-CAMERA_LOC=lat,long
-
-# Paths (FTP Mode)
-SOURCE_PATH=/home/user/ftp/images
-ARCHIVE_DIR=/home/user/ftp/archive
-
-# LookOut Wildfire Detection SDaaS Camera Endpoint (API key)
-LOOKOUT_API_KEY=your_api_key
-
-# ntfy API Key
-NTFY_TOPIC=your_topic
-
-# Pushover Alerts
-PUSHOVER_APP_TOKEN=your_app_token
-PUSHOVER_USER_KEY=your_user_key
-
-# Watchdog Timer Threshold
-TIMER_REQUESTS=25
-TIMER_WATCHDOG=55
-
-# OpenWeather
-OPENWEATHER_API_KEY=your_api_key
-
-```
-
----
-
-## 📖 How to Use
-
-### 1. Choose Your Mode
-
-* **API Mode**: The script "pulls" a snapshot from the camera via HTTP.
-* **FTP Mode**: The script "watches" a folder for images "pushed" by the camera or NVR.
-
-### 2. Execute
-
-Run the script manually or via **Cron job** every minute:
-
-**Standard API Run:**
+Run the provided `install.sh` script to set up the directory structure and install dependencies:
 
 ```bash
-python3 LookoutConnect.py api
+chmod +x install.sh
+./install.sh
 
 ```
 
-**FTP Mode with Bandwidth Saving:**
+### 2. Configure the `.env`
+
+Update the `.env` file with your camera credentials and API keys. This is the **single source of truth** for the entire system.
+
+### 3. Execution Modes
+
+**API Mode (Pull)**: Direct snapshot from the camera URL.
 
 ```bash
-python3 LookoutConnect.py ftp --resize
+python3 lookoutConnect.py api --runs 60
 
 ```
 
-**Manual File Upload (Override):**
+**FTP Mode (Push)**: Monitor a local directory for new images.
 
 ```bash
-python3 LookoutConnect.py ftp --file /path/to/test_fire.jpg
+python3 lookoutConnect.py ftp --resize
 
 ```
 
 ---
 
-## ⏲️ Automation (Crontab)
+## 📊 Incident Workflow
 
-To automate, run `crontab -e` and add:
+1. **Capture**: Image is pulled from the camera or detected in the FTP inbox.
+2. **Analyze**: Image is optionally resized and uploaded to LookOut AI Detection Platform.
+3. **Enrich**: If a wildfire (or other supported object) is detected, localized weather data is fetched.
+4. **Alert**:
+* **Pushover**: Emergency alarm sounds on mobile devices.
+* **ntfy.sh**: Real-time push notification sent.
+* **ACS Pro**: Local physical alarm/relay is activated.
+
+
+5. **Archive**: The evidence image and AI metadata are stored for forensic review.
+
+---
+
+## 🧪 Manual Test Mode
+
+To ensure your system is working correctly before a fire actually occurs, **LookoutConnect** includes a manual test mode. This allows you to bypass the camera network and "push" a specific local image through the entire AI analysis and notification pipeline.
+
+The `--file` argument is used specifically with **FTP mode**. It tells the script: *"Ignore the camera folder; process this specific file instead."*
+
+#### 1. Prepare your Test Image
+
+Find a representative image (preferably one containing smoke or a controlled burn for a positive test) and place it in your script folder. Let's call it `test_fire.jpg`.
+
+#### 2. Execute the Test Command
+
+Run the following command in your terminal or command prompt:
 
 ```bash
-* * * * * /usr/bin/python3 /absolute/path/to/LookoutConnect.py ftp --resize >> /var/log/lookout.log 2>&1
+python3 LookoutConnect.py ftp --file test_fire.jpg
 
 ```
+
+#### 3. What to Expect
+
+When you run this command, the script performs the following steps:
+
+1. **Bypasses State Tracking**: It ignores the `.ptr` file, so you can test the same image multiple times.
+2. **AI Analysis**: It uploads `test_fire.jpg` to the LookOut platform.
+3. **Full Alert Chain**: If the AI detects smoke in your test image, it will trigger the **Pushover** alarm, **ntfy** message, and the **ACS Pro** rule just as it would during a real event.
+4. **Logging**: The results will be recorded in `detectionResults.txt` with a "Manual" tag.
+
+
+#### 💡 Pro-Tip: Verification Checklist
+
+When testing with a local file, verify the following:
+
+* **Pushover**: Does the notification include the "Emergency" repeating sound?
+* **Weather**: Does the message correctly display the current temperature from the `openWeather` module?
+* **Logs**: Check `archive/detectionResults.txt` to see if the AI confidence scores are being recorded correctly.
+
+---
