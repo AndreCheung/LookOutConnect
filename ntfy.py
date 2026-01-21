@@ -1,54 +1,39 @@
 #! python3
-# Date: 20260105, add ntfy.sh notification
+# ntfy.py | 2026-01-21 | Modular Version
+# Purpose: Dispatch urgent notifications via ntfy.sh
 
-import os, pathlib, requests, logging
-from datetime import datetime
-from dotenv import load_dotenv
+import requests
+import logging
 
-load_dotenv()
-# Configuration for standard output logging
-logging.basicConfig(filename='log.txt', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-# logging.disable(logging.ERROR)
+def send_alert(image_path, topic, camera_name, detection_time, timeout=25):
+    """
+    Sends an urgent notification to ntfy.sh with an image attachment.
+    """
+    if not topic:
+        logging.warning("[!] ntfy.sh topic missing. Skipping alert.")
+        return False
 
-# --- CONFIGURATION ---
-CAM_NAME = os.getenv("CAMERA_NAME")
-ARCHIVE_DIR = pathlib.Path(os.getenv("ARCHIVE_DIR") or "./archive")
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-LOG_FILE = ARCHIVE_DIR / "detectionResults.txt"
-NTFY_TOPIC = os.getenv("NTFY_TOPIC")
-REQUESTS_TIMER = int(os.getenv("TIMER_REQUESTS", 25))
-
-# --- TOOLS ---
-def get_timestamp(space=False):
-    if space:
-        return datetime.now().strftime("%Y-%m-%d %H-%M-%S") # Replaced : with - for Windows filename compatibility
-    else:
-        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-# --- CORE FUNCTIONS ---
-def send_ntfy_alert(image_path, camera_name, detection_time):
-    if not NTFY_TOPIC:
-        logging.warning("â ï¸ ntfy.sh key missing")
-        return
-    
-    payload ={
-        "title": f"LookOut alert: {camera_name}, {detection_time}",
-        "message": "Please check the image.",
-        "priority": "5",  # 5 = Urgent (Max priority)
-        "tags": "fire,rotating_light",
-        "filename": "alert.jpg"
+    # ntfy uses headers to define message metadata
+    headers = {
+        "Title": f"LookOut Alert: {camera_name}, {detection_time}",
+        "Message": "AI detection. Please check.",
+        "Priority": "5",        # 5 = Urgent/Max
+        "Tags": "fire,rotating_light",
+        "Filename": "alert.jpg"
     }
 
     try:
         with open(image_path, "rb") as image_file:
-            requests.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=image_file, headers=payload, timeout=REQUESTS_TIMER)
-            logging.info("â ntfy.sh alert dispatched.")
+            # For ntfy, the image data is sent as the request body (data=)
+            response = requests.post(
+                f"https://ntfy.sh/{topic}",
+                data=image_file,
+                headers=headers,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            logging.info("[+] ntfy.sh alert dispatched successfully.")
+            return True
     except Exception as e:
-        logging.error(f"â ntfy.sh Exception: {e}")
-
-"""
-# Example use of send_ntfy_alert() function
-if __name__ == "__main__":
-    annotated_path = "testbird.jpg"
-    send_ntfy_alert(annotated_path, CAM_NAME, get_timestamp('space'))
-"""
+        logging.error(f"[-] ntfy.sh Exception: {e}")
+        return False
