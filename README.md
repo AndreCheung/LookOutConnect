@@ -88,7 +88,7 @@ Find a representative image (preferably one containing smoke or a controlled bur
 Run the following command in your terminal or command prompt:
 
 ```bash
-python3 LookoutConnect.py ftp --file test_fire.jpg
+python3 lookoutConnect.py ftp --file test_fire.jpg
 
 ```
 
